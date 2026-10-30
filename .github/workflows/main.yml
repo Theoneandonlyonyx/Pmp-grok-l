@@ -1,0 +1,89 @@
+name: build-jar
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the newest zip and unpack it
+        run: |
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "No zip in the repo root, building the repo root itself"
+            # Falls kein ZIP da ist, schauen wir ob der pmp Ordner direkt im Repo liegt
+            if [ -d "pmp" ]; then
+              echo "Found pmp folder in repo root."
+              echo "SRC=pmp" >> "$GITHUB_ENV"
+            else
+              echo "SRC=." >> "$GITHUB_ENV"
+            fi
+          else
+            newest=""; best=-1
+            for z in "${zips[@]}"; do
+              t=$(git log -1 --format=%ct -- "$z")
+              t=${t:-0}
+              if [ "$t" -gt "$best" ] || { [ "$t" -eq "$best" ] && [[ "$z" > "$newest" ]]; }; then
+                best=$t; newest=$z
+              fi
+            done
+            echo "Using zip: $newest"
+            rm -rf _src && mkdir _src
+            unzip -q -o "$newest" -d _src
+            
+            # Gezielte Suche nach dem pmp-Ordner innerhalb des entpackten ZIPs
+            if [ -d "_src/pmp" ]; then
+              echo "Targeting extracted pmp folder"
+              echo "SRC=_src/pmp" >> "$GITHUB_ENV"
+            else
+              # Fallback: Falls der Ordner anders heißt oder flach liegt, suche build.gradle
+              gradle_file=$(find _src -name build.gradle | head -1)
+              test -n "$gradle_file"
+              echo "SRC=$(dirname "$gradle_file")" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.8
+
+      - name: Make gradlew executable
+        run: |
+          if [ -f "${{ env.SRC }}/gradlew" ]; then
+            chmod +x "${{ env.SRC }}/gradlew"
+          fi
+
+      # WICHTIG FÜR FORGE 1.20.1: Generiert die Minecraft-Klassen und Mappings auf dem Runner
+      - name: Generate Forge Runs and Sources
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew genIntellijRuns --no-daemon
+          else
+            gradle genIntellijRuns --no-daemon
+          fi
+        working-directory: ${{ env.SRC }}
+
+      - name: Build Mod JAR
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew build --no-daemon
+          else
+            gradle build --no-daemon
+          fi
+        working-directory: ${{ env.SRC }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlantMegaPack-mikexxx-port-jar
+          path: ${{ env.SRC }}/build/libs/*.jar
+          if-no-files-found: error
